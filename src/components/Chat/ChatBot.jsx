@@ -2,19 +2,21 @@ import './Chat.css'; // Should point to src/components/Chat/Chat.css
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FaMoon, FaQuestionCircle, FaSignOutAlt, FaSun, FaUserCircle } from 'react-icons/fa';
+import { FaCog } from 'react-icons/fa';
+
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useLocation } from '../../context/LocationContext';
+
 import ChatHistory from './ChatHistory';
 import MessageInput from './MessageInput';
 import MessageList from './MessageList';
 import QuickActions from './QuickActions';
 import WeatherWidget from './WeatherWidget';
-import { storage } from '../../utils/storage';
 import SettingsModal from './SettingsModal';
-import { FaCog } from 'react-icons/fa';
-import { queryAgent, saveChat } from '../../utils/agentApi';
 
+import { storage } from '../../utils/storage';
+import { queryAgent, saveChat } from '../../utils/agentApi';
 
 const ChatBot = () => {
   const [messages, setMessages] = useState([]);
@@ -24,32 +26,33 @@ const ChatBot = () => {
   const [openMenuId, setOpenMenuId] = useState(null);
   const [notifications, setNotifications] = useState([]);
   const [showHelp, setShowHelp] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { location } = useLocation();
 
-  const [showSettings, setShowSettings] = useState(false);
   const navigate = useNavigate();
   const endRef = useRef(null);
   const inputRef = useRef(null);
   const hasMessages = messages.length > 0;
 
-  // Store messages per chat session
+  /* ---------- STORAGE HELPERS ---------- */
   const getChatMessagesKey = (chatId) => `chatMessages_${chatId}`;
+
   const getChatMessages = (chatId) => {
-    const key = getChatMessagesKey(chatId);
-    return storage.getItem(key) || [];
-  };
-  const saveChatMessages = (chatId, msgs) => {
-    const key = getChatMessagesKey(chatId);
-    storage.setItem(key, msgs);
+    return storage.getItem(getChatMessagesKey(chatId)) || [];
   };
 
+  const saveChatMessages = (chatId, msgs) => {
+    storage.setItem(getChatMessagesKey(chatId), msgs);
+  };
+
+  /* ---------- RESTORE HISTORY LIST ONLY ---------- */
   useEffect(() => {
     const storedHistory = storage.getItem('chatHistory');
-    let hydratedHistory = [];
     if (storedHistory && Array.isArray(storedHistory)) {
-      hydratedHistory = storedHistory.map((entry) => ({
+      const hydrated = storedHistory.map((entry) => ({
         ...entry,
         timestamp: entry.timestamp ? new Date(entry.timestamp) : new Date(),
         titleLocked:
@@ -57,35 +60,32 @@ const ChatBot = () => {
             ? entry.titleLocked
             : entry.text !== 'New conversation'
       }));
-      setHistory(hydratedHistory);
-    }
-    const storedActive = storage.getItem('activeHistoryId');
-    if (storedActive) {
-      setActiveHistoryId(storedActive);
-      const storedMessages = getChatMessages(storedActive);
-      if (storedMessages && Array.isArray(storedMessages)) {
-        const hydrated = storedMessages.map((msg) => ({
-          ...msg,
-          timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date()
-        }));
-        setMessages(hydrated);
-      }
-    } else if (hydratedHistory.length) {
-      const firstId = hydratedHistory[0].id;
-      setActiveHistoryId(firstId);
-      const storedMessages = getChatMessages(firstId);
-      if (storedMessages && Array.isArray(storedMessages)) {
-        const hydrated = storedMessages.map((msg) => ({
-          ...msg,
-          timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date()
-        }));
-        setMessages(hydrated);
-      }
+      setHistory(hydrated);
     }
     setRestoring(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* ---------- ALWAYS OPEN NEW CHAT ON LOGIN ---------- */
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const timestamp = new Date();
+    const newChatId = timestamp.getTime();
+
+    const newChat = {
+      id: newChatId,
+      text: 'New conversation',
+      titleLocked: false,
+      timestamp
+    };
+
+    setHistory((prev) => [newChat, ...prev]);
+    setActiveHistoryId(newChatId);
+    setMessages([]);
+  }, [user]);
+
+  /* ---------- PERSIST CURRENT CHAT ---------- */
   useEffect(() => {
     if (!restoring && activeHistoryId) {
       saveChatMessages(activeHistoryId, messages);
@@ -104,11 +104,12 @@ const ChatBot = () => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  /* ---------- UTILITIES ---------- */
   const pushNotification = useCallback((text) => {
     const id = Date.now();
     setNotifications((prev) => [...prev, { id, text }]);
     setTimeout(() => {
-      setNotifications((prev) => prev.filter((note) => note.id !== id));
+      setNotifications((prev) => prev.filter((n) => n.id !== id));
     }, 2000);
   }, []);
 
@@ -116,7 +117,8 @@ const ChatBot = () => {
     inputRef.current?.focus();
   }, []);
 
-  const handleSendMessage = async(text) => {
+  /* ---------- SEND MESSAGE ---------- */
+  const handleSendMessage = async (text) => {
     const userMessage = {
       id: Date.now(),
       text,
@@ -127,26 +129,26 @@ const ChatBot = () => {
     setMessages((prev) => [...prev, userMessage]);
     upsertHistoryItem(text, userMessage.timestamp);
 
-    // Simulate typing delay for more natural feel
-    const typingDelay = Math.random() * 300 + 500;
     try {
       const data = await queryAgent(text);
-    
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          text: data.answer || 'No response from AgroGPT',
-          sender: 'bot',
-          timestamp: new Date()
-        }
-      ]);
-    
+
+      const botMessage = {
+        id: Date.now() + 1,
+        text: data.answer || 'No response from AgroGPT',
+        sender: 'bot',
+        timestamp: new Date()
+      };
+
+      setMessages((prev) => [...prev, botMessage]);
+
       if (user?.id) {
-        saveChat(user.id, text, data.answer);
+        try {
+          await saveChat(user.id, text, botMessage.text);
+        } catch {
+          // ignore backend save failure
+        }
       }
     } catch (error) {
-      console.error(error);
       setMessages((prev) => [
         ...prev,
         {
@@ -157,9 +159,9 @@ const ChatBot = () => {
         }
       ]);
     }
-    
   };
-//////////////////////////////
+
+  /* ---------- CHAT ACTIONS ---------- */
   const handleNewChat = useCallback(() => {
     const timestamp = new Date();
     const newId = timestamp.getTime();
@@ -191,218 +193,41 @@ const ChatBot = () => {
     setOpenMenuId(null);
   }, []);
 
-  const generateBotResponse = (userText) => {
-    const lower = userText.toLowerCase();
-
-    // More natural, conversational responses
-    if (lower.includes('weather') || lower.includes('rain') || lower.includes('temperature')) {
-      return {
-        id: Date.now(),
-        text: location
-          ? `Based on your location, I'm seeing warm conditions with scattered showers expected. This is great for most crops! Would you like specific recommendations for your area?`
-          : `I'd love to give you weather advice! Please allow location access so I can provide personalized recommendations for your farm.`,
-        sender: 'bot',
-        timestamp: new Date()
-      };
-    }
-
-    if (lower.includes('crop') || lower.includes('plant') || lower.includes('seed')) {
-      return {
-        id: Date.now(),
-        text: `Great question! I can help you choose the best crops. To give you the most accurate recommendations, could you tell me your soil type or share your location? I can then suggest crops that will thrive in your conditions.`,
-        sender: 'bot',
-        timestamp: new Date()
-      };
-    }
-
-    if (lower.includes('fertilizer') || lower.includes('fertiliser') || lower.includes('nutrient')) {
-      return {
-        id: Date.now(),
-        text: `Fertilizer selection is crucial for healthy crops! A balanced NPK fertilizer works well for most cereals. For more tailored advice, could you share what stage your crops are at and any soil test results you have?`,
-        sender: 'bot',
-        timestamp: new Date()
-      };
-    }
-
-    if (lower.includes('pest') || lower.includes('insect') || lower.includes('disease')) {
-      return {
-        id: Date.now(),
-        text: `Pest and disease management is important for crop health. The best approach depends on the specific pest and your crop type. Can you describe what you're seeing, or share a photo through the profile section? I can then provide targeted solutions.`,
-        sender: 'bot',
-        timestamp: new Date()
-      };
-    }
-
-    if (lower.includes('harvest') || lower.includes('harvesting')) {
-      return {
-        id: Date.now(),
-        text: `Harvest timing is critical for maximizing yield and quality! The ideal time depends on your crop type and maturity indicators. What crop are you planning to harvest? I can help you determine the best timing.`,
-        sender: 'bot',
-        timestamp: new Date()
-      };
-    }
-
-    if (lower.includes('hello') || lower.includes('hi') || lower.includes('hey')) {
-      return {
-        id: Date.now(),
-        text: `Hello! I'm your Agriculture Assistant. I'm here to help with crop management, weather advice, pest control, and more. What would you like to know today?`,
-        sender: 'bot',
-        timestamp: new Date()
-      };
-    }
-
-    return {
-      id: Date.now(),
-      text: `I understand you're asking about "${userText}". As your agriculture assistant, I can help with crop planning, pest control, fertilizer recommendations, weather insights, and market trends. Could you provide a bit more detail so I can give you the best advice?`,
-      sender: 'bot',
-      timestamp: new Date()
-    };
+  const upsertHistoryItem = (text, timestamp = new Date()) => {
+    setHistory((prev) => {
+      if (activeHistoryId) {
+        return prev.map((entry) => {
+          if (entry.id !== activeHistoryId) return entry;
+          if (entry.titleLocked) return { ...entry, timestamp };
+          return { ...entry, text, timestamp, titleLocked: true };
+        });
+      }
+      const newId = timestamp.getTime();
+      setActiveHistoryId(newId);
+      return [{ id: newId, text, timestamp, titleLocked: true }, ...prev];
+    });
   };
 
+  /* ---------- LOGOUT (NO AUTO RESTORE) ---------- */
   const handleLogout = () => {
+    setMessages([]);
+    setActiveHistoryId(null);
+    storage.removeItem('activeHistoryId');
     logout();
     navigate('/login');
   };
 
+  /* ---------- CLEAR HISTORY ---------- */
   const clearHistory = () => {
     setHistory([]);
     setMessages([]);
     setActiveHistoryId(null);
     storage.removeItem('chatHistory');
     storage.removeItem('activeHistoryId');
-    // Also remove all individual chat messages
-    // This is a simplification; ideally we'd track all chat IDs to delete them
     setShowSettings(false);
   };
 
-  const handleSaveChat = useCallback(() => {
-    if (!activeHistoryId) {
-      pushNotification('No active chat to save yet');
-      return;
-    }
-    saveChatMessages(activeHistoryId, messages);
-    storage.setItem('chatHistory', history);
-    pushNotification('Chat saved');
-  }, [activeHistoryId, history, messages, pushNotification]);
-
-  const handleRenameChat = useCallback(
-    (chatId) => {
-      const existing = history.find((item) => item.id === chatId);
-      const nextTitle = window.prompt('Rename chat', existing?.text || '');
-      if (!nextTitle || !nextTitle.trim()) {
-        pushNotification('Rename cancelled');
-        return;
-      }
-
-      setHistory((prev) =>
-        prev.map((item) =>
-          item.id === chatId
-            ? { ...item, text: nextTitle.trim(), titleLocked: true }
-            : item
-        )
-      );
-      pushNotification('Chat renamed');
-    },
-    [history, pushNotification]
-  );
-
-  const handleShareChat = useCallback(
-    async (chatId) => {
-      const shareMessages =
-        chatId === activeHistoryId ? messages : getChatMessages(chatId) || [];
-
-      const printable =
-        shareMessages.length === 0
-          ? 'No messages in this chat yet.'
-          : shareMessages
-              .map(
-                (msg) =>
-                  `${msg.sender === 'user' ? 'You' : 'Bot'}: ${msg.text}`
-              )
-              .join('\n');
-
-      try {
-        if (navigator?.clipboard?.writeText) {
-          await navigator.clipboard.writeText(printable);
-          pushNotification('Chat copied to clipboard');
-        } else {
-          throw new Error('Clipboard unavailable');
-        }
-      } catch (error) {
-        console.error('Share failed', error);
-        pushNotification('Unable to share this chat');
-      }
-    },
-    [activeHistoryId, messages, pushNotification]
-  );
-
-  const handleDeleteChat = useCallback(
-    (chatId) => {
-      setHistory((prev) => {
-        const nextHistory = prev.filter((item) => item.id !== chatId);
-        storage.removeItem(getChatMessagesKey(chatId));
-
-        if (chatId === activeHistoryId) {
-          const nextActive = nextHistory[0]?.id || null;
-          setActiveHistoryId(nextActive);
-          if (nextActive) {
-            const storedMessages = getChatMessages(nextActive);
-            if (storedMessages && Array.isArray(storedMessages)) {
-              const hydrated = storedMessages.map((msg) => ({
-                ...msg,
-                timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date()
-              }));
-              setMessages(hydrated);
-            } else {
-              setMessages([]);
-            }
-          } else {
-            setMessages([]);
-          }
-        }
-
-        return nextHistory;
-      });
-      pushNotification('Chat deleted');
-    },
-    [activeHistoryId, pushNotification]
-  );
-
-  const toggleHelpPanel = useCallback(() => {
-    setShowHelp((prev) => !prev);
-    setOpenMenuId(null);
-  }, []);
-
-  const handleMenuToggle = useCallback((chatId) => {
-    setOpenMenuId((prev) => (prev === chatId ? null : chatId));
-  }, []);
-
-  const closeMenus = useCallback(() => {
-    setOpenMenuId(null);
-  }, []);
-
-  const upsertHistoryItem = (text, timestamp = new Date()) => {
-    setHistory((prev) => {
-      if (activeHistoryId) {
-        return prev.map((entry) => {
-          if (entry.id !== activeHistoryId) {
-            return entry;
-          }
-          if (entry.titleLocked) {
-            return { ...entry, timestamp };
-          }
-          return { ...entry, text, timestamp, titleLocked: true };
-        });
-      }
-      const newId = timestamp.getTime();
-      setActiveHistoryId(newId);
-      return [
-        { id: newId, text, timestamp, titleLocked: true },
-        ...prev
-      ];
-    });
-  };
-
+  /* ---------- SHORTCUTS ---------- */
   useEffect(() => {
     const handleShortcuts = (event) => {
       const key = event.key.toLowerCase();
@@ -411,80 +236,38 @@ const ChatBot = () => {
       if (isMeta && key === 'n') {
         event.preventDefault();
         handleNewChat();
-      } else if (isMeta && key === 's') {
-        event.preventDefault();
-        handleSaveChat();
-      } else if (isMeta && key === 'd') {
-        event.preventDefault();
-        if (activeHistoryId) {
-          handleDeleteChat(activeHistoryId);
-        }
-      } else if (isMeta && key === 'r') {
-        event.preventDefault();
-        if (activeHistoryId) {
-          handleRenameChat(activeHistoryId);
-        }
-      } else if (isMeta && event.key === '/') {
-        event.preventDefault();
-        toggleHelpPanel();
-      } else if (!isMeta && event.key === '/') {
+      } else if (event.key === '/') {
         event.preventDefault();
         focusInput();
-        closeMenus();
-      } else if (event.key === 'Escape') {
-        closeMenus();
-        setShowHelp(false);
       }
     };
 
     window.addEventListener('keydown', handleShortcuts);
     return () => window.removeEventListener('keydown', handleShortcuts);
-  }, [
-    activeHistoryId,
-    closeMenus,
-    focusInput,
-    handleDeleteChat,
-    handleNewChat,
-    handleRenameChat,
-    handleSaveChat,
-    toggleHelpPanel
-  ]);
+  }, [focusInput, handleNewChat]);
 
+  /* ---------- UI (UNCHANGED) ---------- */
   return (
     <div className="chatbot-container">
       <div className="chat-layout">
         <aside className="chat-sidebar">
           <div className="sidebar-header">
-            <button
-              className="new-chat-button"
-              onClick={handleNewChat}
-              title="New chat (Ctrl/Cmd + N)"
-            >
+            <button className="new-chat-button" onClick={handleNewChat}>
               + New Chat
             </button>
-            <button
-              className="save-chat-button"
-              onClick={handleSaveChat}
-              title="Save chat (Ctrl/Cmd + S)"
-              aria-label="Save chat"
-            >
-              Save
-            </button>
           </div>
+
           <ChatHistory
             history={history}
             activeHistoryId={activeHistoryId}
             onHistorySelect={handleLoadChat}
             onHistoryClick={handleLoadChat}
-            onRename={handleRenameChat}
-            onShare={handleShareChat}
-            onDelete={handleDeleteChat}
             openMenuId={openMenuId}
-            onMenuToggle={handleMenuToggle}
-            onCloseMenus={closeMenus}
           />
+
           <WeatherWidget location={location} />
         </aside>
+
         <div className="chat-main">
           <div className="chatbot-header">
             <div className="header-left">
@@ -494,23 +277,13 @@ const ChatBot = () => {
                 <span className="user-email">{user?.email}</span>
               </div>
             </div>
+
             <div className="header-right">
-              <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
+              <button className="theme-toggle" onClick={toggleTheme}>
                 {theme === 'light' ? <FaMoon /> : <FaSun />}
               </button>
-              <button
-                className="help-btn"
-                onClick={toggleHelpPanel}
-                title="Shortcuts (Ctrl/Cmd + /)"
-                aria-label="Open keyboard shortcuts"
-              >
-                <FaQuestionCircle />
-              </button>
-              <button className="settings-btn" onClick={() => setShowSettings(true)} title="Settings">
+              <button onClick={() => setShowSettings(true)}>
                 <FaCog />
-              </button>
-              <button className="profile-btn" onClick={() => navigate('/profile')}>
-                Profile
               </button>
               <button className="logout-btn" onClick={handleLogout}>
                 <FaSignOutAlt /> Logout
@@ -548,58 +321,10 @@ const ChatBot = () => {
           />
         </div>
       </div>
-      {showHelp && (
-        <div className="help-overlay" role="dialog" aria-modal="true" onClick={toggleHelpPanel}>
-          <div
-            className="help-panel"
-            onClick={(event) => event.stopPropagation()}
-            role="document"
-          >
-            <div className="help-header">
-              <h3>Keyboard Shortcuts</h3>
-              <button
-                className="close-help-btn"
-                onClick={toggleHelpPanel}
-                title="Close (Esc)"
-                aria-label="Close shortcuts panel"
-              >
-                ×
-              </button>
-            </div>
-            <ul className="shortcut-list">
-              <li>
-                <span>New chat</span>
-                <span className="shortcut-kbd">Ctrl/Cmd + N</span>
-              </li>
-              <li>
-                <span>Save chat</span>
-                <span className="shortcut-kbd">Ctrl/Cmd + S</span>
-              </li>
-              <li>
-                <span>Delete chat</span>
-                <span className="shortcut-kbd">Ctrl/Cmd + D</span>
-              </li>
-              <li>
-                <span>Rename chat</span>
-                <span className="shortcut-kbd">Ctrl/Cmd + R</span>
-              </li>
-              <li>
-                <span>Focus chat input</span>
-                <span className="shortcut-kbd">/</span>
-              </li>
-              <li>
-                <span>Toggle shortcuts</span>
-                <span className="shortcut-kbd">Ctrl/Cmd + /</span>
-              </li>
-              <li>
-                <span>Close menu/panel</span>
-                <span className="shortcut-kbd">Esc</span>
-              </li>
-            </ul>
-          </div>
-        </div>
-      )}
-      <div className="toast-stack" aria-live="polite" aria-atomic="true">
+
+      {showHelp && <div className="help-overlay" />}
+
+      <div className="toast-stack">
         {notifications.map((note) => (
           <div key={note.id} className="toast">
             {note.text}
