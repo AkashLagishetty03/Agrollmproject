@@ -1,4 +1,6 @@
-<<<<<<< HEAD
+# AgroGPT
+
+AgroGPT is an AI-powered agricultural assistant that helps farmers with crop advice, weather updates, and market price insights using LLMs and RAG.
 # Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
